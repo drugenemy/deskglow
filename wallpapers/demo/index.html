@@ -75,6 +75,9 @@ function frame(t) {
 }
 requestAnimationFrame(frame);
 
+// lock screen: just the particles, no clock (Windows shows its own)
+if (window.deskglow) deskglow.drawLockBackground = (g, w, h) => g.drawImage(c, 0, 0, w, h);
+
 const clock = document.getElementById('clock');
 function tick() { clock.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 tick(); setInterval(tick, 1000);

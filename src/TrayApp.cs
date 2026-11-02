@@ -13,9 +13,12 @@ internal sealed class TrayApp : ApplicationContext
     readonly NotifyIcon tray = new();
     readonly System.Windows.Forms.Timer mouseTimer = new() { Interval = 16 };
     readonly System.Windows.Forms.Timer pauseTimer = new() { Interval = 1000 };
+    readonly System.Windows.Forms.Timer lockTimer = new() { Interval = 30 * 60 * 1000 };
     readonly ExplorerWatcher explorer;
+    readonly LockScreen lockScreen;
 
     WallpaperForm? wall;
+    bool lockBusy;
     bool userPaused;
     int lastX = int.MinValue, lastY = int.MinValue, lastButtons;
 
@@ -36,9 +39,110 @@ internal sealed class TrayApp : ApplicationContext
         explorer = new ExplorerWatcher(() => Rebuild());
         SystemEvents.DisplaySettingsChanged += (_, _) => { if (wall != null) host.Fit(wall.Handle); };
 
+        lockScreen = new LockScreen(cfg);
+        lockTimer.Tick += (_, _) => UpdateLock(false);
+        SystemEvents.SessionSwitch += OnSessionSwitch;
+
         Rebuild();
         mouseTimer.Start();
         pauseTimer.Start();
+        lockTimer.Start();
+    }
+
+    // ── lock screen ──────────────────────────────────────────────────────────
+
+    async void OnSessionSwitch(object? sender, SessionSwitchEventArgs e)
+    {
+        // Refresh right after unlock, so the image is fresh the next time the PC locks.
+        if (e.Reason == SessionSwitchReason.SessionUnlock) { await Task.Delay(6000); UpdateLock(false); }
+    }
+
+    async void ScheduleLockUpdate(int delayMs = 6000)
+    {
+        if (!cfg.LockEnabled) return;
+        await Task.Delay(delayMs);
+        UpdateLock(false);
+    }
+
+    /// <summary>Renders the current wallpaper + widgets and sets it as the Windows lock screen.</summary>
+    async void UpdateLock(bool manual)
+    {
+        if ((!cfg.LockEnabled && !manual) || lockBusy) return;
+        if (wall == null) return;
+        lockBusy = true;
+        try
+        {
+            var data = await lockScreen.BuildDataAsync();
+            var b = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
+            var image = await wall.RenderLockAsync(b.Width, b.Height, data);
+            if (image == null)
+            {
+                if (manual) tray.ShowBalloonTip(4000, "Deskglow", "Could not make the lock screen image. Is the wallpaper paused?", ToolTipIcon.Warning);
+                return;
+            }
+            await lockScreen.ApplyAsync(image);
+            if (manual) tray.ShowBalloonTip(3000, "Deskglow", "Lock screen updated. Press Win + L to see it.", ToolTipIcon.Info);
+        }
+        catch (Exception ex)
+        {
+            if (manual) tray.ShowBalloonTip(6000, "Deskglow", "Windows did not accept the lock screen image: " + ex.Message, ToolTipIcon.Error);
+        }
+        finally { lockBusy = false; }
+    }
+
+    ToolStripMenuItem BuildLockMenu()
+    {
+        var lk = new ToolStripMenuItem("Lock screen");
+        lk.DropDownItems.Add(new ToolStripMenuItem("Use wallpaper as lock screen", null, (_, _) =>
+        {
+            cfg.LockEnabled = !cfg.LockEnabled;
+            cfg.Save();
+            if (cfg.LockEnabled) UpdateLock(true);
+        }) { Checked = cfg.LockEnabled });
+        lk.DropDownItems.Add(new ToolStripMenuItem("Update now", null, (_, _) => UpdateLock(true)));
+        lk.DropDownItems.Add(new ToolStripSeparator());
+
+        foreach (var (id, label) in new[] { ("weather", "Weather"), ("note", "Note"), ("year", "Year progress") })
+        {
+            lk.DropDownItems.Add(new ToolStripMenuItem(label, null, (_, _) =>
+            {
+                if (!cfg.LockWidgets.Remove(id)) cfg.LockWidgets.Add(id);
+                cfg.Save();
+                UpdateLock(false);
+            }) { Checked = cfg.LockWidgets.Contains(id) });
+        }
+        lk.DropDownItems.Add(new ToolStripSeparator());
+
+        var cityLabel = string.IsNullOrEmpty(cfg.CityName) ? "Set city for weather…" : $"City: {cfg.CityName}…";
+        lk.DropDownItems.Add(new ToolStripMenuItem(cityLabel, null, async (_, _) =>
+        {
+            var city = Prompt.Ask("Weather city", "Which city? (for example: Tashkent)", cfg.City);
+            if (string.IsNullOrWhiteSpace(city)) return;
+            try
+            {
+                var found = await lockScreen.SetCityAsync(city.Trim());
+                if (found == null) { tray.ShowBalloonTip(4000, "Deskglow", $"Could not find \"{city}\".", ToolTipIcon.Warning); return; }
+                if (!cfg.LockWidgets.Contains("weather")) { cfg.LockWidgets.Insert(0, "weather"); cfg.Save(); }
+                UpdateLock(true);
+            }
+            catch { tray.ShowBalloonTip(4000, "Deskglow", "No internet, could not look up the city.", ToolTipIcon.Warning); }
+        }));
+        lk.DropDownItems.Add(new ToolStripMenuItem(cfg.Fahrenheit ? "Units: °F" : "Units: °C", null, (_, _) =>
+        {
+            cfg.Fahrenheit = !cfg.Fahrenheit;
+            cfg.Save();
+            UpdateLock(false);
+        }));
+        lk.DropDownItems.Add(new ToolStripMenuItem("Write note…", null, (_, _) =>
+        {
+            var note = Prompt.Ask("Lock screen note", "A short note for your lock screen:", cfg.Note);
+            if (note == null) return;
+            cfg.Note = note.Trim();
+            if (cfg.Note.Length > 0 && !cfg.LockWidgets.Contains("note")) cfg.LockWidgets.Add("note");
+            cfg.Save();
+            UpdateLock(true);
+        }));
+        return lk;
     }
 
     /// <summary>Creates (or re-creates after an Explorer restart) the wallpaper window.</summary>
@@ -63,6 +167,7 @@ internal sealed class TrayApp : ApplicationContext
 
         await form.InitAsync();
         form.LoadWallpaper(ResolveWallpaper(cfg.Current));
+        ScheduleLockUpdate();
     }
 
     string ResolveWallpaper(string name)
@@ -95,6 +200,7 @@ internal sealed class TrayApp : ApplicationContext
                 cfg.Current = name;
                 cfg.Save();
                 wall?.LoadWallpaper(Path.Combine(WallpapersDir, name));
+                ScheduleLockUpdate();
             };
             pick.DropDownItems.Add(item);
         }
@@ -103,6 +209,7 @@ internal sealed class TrayApp : ApplicationContext
 
         m.Items.Add(new ToolStripMenuItem(userPaused ? "Resume" : "Pause", null, (_, _) => TogglePause()));
         m.Items.Add(new ToolStripMenuItem("Reload", null, (_, _) => wall?.Reload()));
+        m.Items.Add(BuildLockMenu());
         m.Items.Add(new ToolStripSeparator());
 
         m.Items.Add(new ToolStripMenuItem("Auto-pause when a window covers the screen", null, (_, _) =>
@@ -209,6 +316,8 @@ internal sealed class TrayApp : ApplicationContext
     {
         mouseTimer.Stop();
         pauseTimer.Stop();
+        lockTimer.Stop();
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
         tray.Visible = false;
         wall?.Dispose();
         explorer.DestroyHandle();

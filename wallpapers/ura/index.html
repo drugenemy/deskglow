@@ -65,7 +65,7 @@ const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let W = 0, H = 0, DPR = 1, K = 1;
 let U, N, TR, SR;
 const IMG = {}, SKETCH = new Map();
-let scene, sceneIdx = 0, art, layerBase, layerArt, layerPaper, grainPat, dotSprite;
+let scene, sceneIdx = 0, art, layerBase, layerArt, layerPaper, grainPat, grainCanvas, dotSprite;
 const smoke = document.createElement('canvas'), sctx = smoke.getContext('2d');
 let smokeData = null;
 
@@ -263,6 +263,7 @@ function buildSprites() {
   const c = mk(220, 220), g = c.getContext('2d'), id = g.createImageData(220, 220);
   for (let i = 0; i < id.data.length; i += 4) { const v = Math.random() * 255; id.data[i] = id.data[i+1] = id.data[i+2] = v; id.data[i+3] = 255; }
   g.putImageData(id, 0, 0);
+  grainCanvas = c;
   grainPat = ctx.createPattern(c, 'repeat');
   dotSprite = mk(64, 64);
   const d = dotSprite.getContext('2d'), gr = d.createRadialGradient(32, 32, 0, 32, 32, 32);
@@ -687,6 +688,32 @@ function frame(now) {
   ctx.translate(-Math.random() * 200, -Math.random() * 200);
   ctx.fillRect(0, 0, W + 220, H + 220);
   ctx.restore();
+}
+
+// ── lock screen: a clean still frame (no clock, no bands); Deskglow draws the widgets on top ──
+function drawStill(g, w, h) {
+  const k = h / 1080, img = IMG[scene.img], ratio = img.naturalWidth / img.naturalHeight;
+  const ah = h, aw = ah * ratio;
+  const x = scene.side === 'left' ? 0 : scene.side === 'flush' ? w - aw : Math.min(w * .64 - aw / 2, w - aw - 40 * k);
+  g.fillStyle = rgb(scene.bg); g.fillRect(0, 0, w, h);
+  const v = g.createRadialGradient(w * .5, h * .45, h * .1, w * .5, h * .5, Math.max(w, h) * .75);
+  v.addColorStop(0, scene.light ? 'rgba(255,250,240,.35)' : 'rgba(40,52,38,.22)'); v.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = v; g.fillRect(0, 0, w, h);
+  const free = scene.side === 'left' ? [x + aw * .92, w] : [0, Math.max(w * .3, x + aw * .12)], fw = free[1] - free[0];
+  txt(g, scene.title, free[0] + fw * .5, h * .5, `600 ${Math.min(620 * k, fw * .9)}px ${JP}`, scene.accent,
+      { align: 'center', base: 'middle', alpha: scene.light ? .06 : .05 });
+  g.drawImage(maskedArt(img, aw, ah, scene.fade), x, 0, aw, ah);
+  g.save();
+  g.globalCompositeOperation = scene.light ? 'multiply' : 'screen';
+  g.globalAlpha = scene.light ? .12 : .35; g.imageSmoothingQuality = 'high';
+  g.drawImage(smoke, 0, 0, w, h);
+  g.restore();
+  g.save(); g.globalAlpha = scene.light ? .06 : .045; g.fillStyle = g.createPattern(grainCanvas, 'repeat'); g.fillRect(0, 0, w, h); g.restore();
+}
+if (window.deskglow) {
+  deskglow.drawLockBackground = (g, w, h) => drawStill(g, w, h);
+  deskglow.lockTheme = () => ({ side: scene.side === 'left' ? 'right' : 'left', fg: scene.light ? '#0e0f0d' : '#ece6d6',
+    accent: scene.accent, light: !!scene.light, sans: COND, serif: SERIF });
 }
 
 // ── your own images (browser demo): file picker + drag & drop ──

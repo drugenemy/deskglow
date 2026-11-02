@@ -35,6 +35,16 @@ Move the mouse, click, double-click, or drop in your own image.
 
 **demo** — glowing particles that follow the mouse.
 
+**Lock screen with widgets** — Windows does not allow live content on the lock screen, so Deskglow makes a still picture of your wallpaper and puts widgets on it:
+
+- **Weather** for your city: now, today's high/low, the next 3 days (free data from [Open-Meteo](https://open-meteo.com), no account)
+- **Your note**: a short line you write yourself
+- **Year progress**: day, week, and how much of the year is gone
+
+It refreshes every 30 minutes and right after you unlock, so it is fresh the next time you lock. The widgets take the wallpaper's colors and sit on the side away from the art. Turn it on in the tray menu: **Lock screen → Use wallpaper as lock screen**.
+
+![Lock screen](docs/lockscreen.jpg)
+
 ---
 
 ## Install (Windows 10 / 11)
@@ -64,6 +74,15 @@ Open `wallpapers/ura/`:
 Every option is explained at the top of `scenes.js`: text, colors, effects (`pipe` smoke, `embers`, `fireflies`, `petals`, `ash`), and where the art sits.
 
 **Your own wallpaper from scratch:** make a folder in `wallpapers/` with an `index.html`. Normal `mousemove` / `click` events work. You also get `window.deskglow.paused` and `deskglow.on('pause' | 'resume', fn)`.
+
+For a nicer lock screen, a wallpaper can also define:
+
+```js
+deskglow.drawLockBackground = (ctx, w, h) => { /* draw a clean still frame, no clock */ };
+deskglow.lockTheme = () => ({ side: 'left', fg: '#ece6d6', accent: '#8fae93', light: false });
+```
+
+Without these, Deskglow uses a screenshot of the wallpaper.
 
 > Only share images you have the right to share. Fan art and official art belong to their creators. Keeping them on your own PC is your call; putting them in a public repo or a download is not.
 
