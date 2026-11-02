@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Deskglow demo</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #clock { position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%);
+           font: 200 9vw/1 "Segoe UI Variable Display", "Segoe UI", sans-serif; color: #fff;
+           letter-spacing: .04em; opacity: .14; pointer-events: none; user-select: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="clock"></div>
+<script>
+// Flow-field particles. Mouse pulls them in, click pushes them out.
+const c = document.getElementById('c'), g = c.getContext('2d');
+let W, H, dpr, parts = [];
+const N = 2600;
+const mouse = { x: -1e4, y: -1e4, down: false };
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = c.width = innerWidth * dpr; H = c.height = innerHeight * dpr;
+  g.fillStyle = '#05060a'; g.fillRect(0, 0, W, H);
+}
+addEventListener('resize', resize); resize();
+
+for (let i = 0; i < N; i++) parts.push(spawn({}));
+function spawn(p) {
+  p.x = Math.random() * W; p.y = Math.random() * H; p.vx = 0; p.vy = 0;
+  p.life = 200 + Math.random() * 400; p.hue = 190 + Math.random() * 80; return p;
+}
+
+addEventListener('mousemove', e => { mouse.x = e.clientX * dpr; mouse.y = e.clientY * dpr; });
+addEventListener('mousedown', () => mouse.down = true);
+addEventListener('mouseup', () => mouse.down = false);
+addEventListener('click', e => {
+  const bx = e.clientX * dpr, by = e.clientY * dpr;
+  for (const p of parts) {
+    const dx = p.x - bx, dy = p.y - by, d = Math.hypot(dx, dy) + 1;
+    if (d < 400 * dpr) { const f = 30 / d * 60; p.vx += dx / d * f; p.vy += dy / d * f; p.hue = 320 + Math.random() * 40; }
+  }
+});
+
+function field(x, y, t) {
+  const s = 0.0016 / dpr;
+  return Math.sin(x * s + t * .0002) * 2 + Math.cos(y * s * 1.3 - t * .00015) * 2 + Math.sin((x + y) * s * .5);
+}
+
+let t0 = performance.now();
+function frame(t) {
+  requestAnimationFrame(frame);
+  if (window.deskglow?.paused) return;
+  g.fillStyle = 'rgba(5,6,10,0.08)'; g.fillRect(0, 0, W, H);
+  g.globalCompositeOperation = 'lighter';
+  for (const p of parts) {
+    const a = field(p.x, p.y, t);
+    p.vx += Math.cos(a) * .12 * dpr; p.vy += Math.sin(a) * .12 * dpr;
+    const dx = mouse.x - p.x, dy = mouse.y - p.y, d = Math.hypot(dx, dy) + 1;
+    const reach = 260 * dpr;
+    if (d < reach) { const f = (1 - d / reach) * (mouse.down ? -1.4 : .9); p.vx += dx / d * f; p.vy += dy / d * f; }
+    p.vx *= .94; p.vy *= .94;
+    const ox = p.x, oy = p.y; p.x += p.vx; p.y += p.vy;
+    const sp = Math.min(1, Math.hypot(p.vx, p.vy) / (6 * dpr));
+    g.strokeStyle = `hsla(${p.hue},90%,${55 + sp * 25}%,${.25 + sp * .5})`;
+    g.lineWidth = dpr * (.8 + sp);
+    g.beginPath(); g.moveTo(ox, oy); g.lineTo(p.x, p.y); g.stroke();
+    p.hue += (205 - p.hue) * .002;
+    if (--p.life < 0 || p.x < -50 || p.x > W + 50 || p.y < -50 || p.y > H + 50) spawn(p);
+  }
+  g.globalCompositeOperation = 'source-over';
+}
+requestAnimationFrame(frame);
+
+const clock = document.getElementById('clock');
+function tick() { clock.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+tick(); setInterval(tick, 1000);
+</script>
+</body>
+</html>

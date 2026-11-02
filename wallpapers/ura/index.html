@@ -1,0 +1,737 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>裏 ura — Deskglow</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #070807; cursor: none; }
+  body.web { cursor: default; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #ui { position: fixed; inset: auto 20px 20px auto; display: none; gap: 10px; font: 500 13px/1 "Segoe UI", system-ui, sans-serif; }
+  body.web #ui { display: flex; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 11px 16px; border-radius: 999px; cursor: pointer;
+          color: #efe9da; background: rgba(12,14,12,.62); border: 1px solid rgba(230,224,207,.25);
+          backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); text-decoration: none; letter-spacing: .02em; }
+  .pill:hover { background: rgba(30,36,30,.75); border-color: rgba(230,224,207,.5); }
+  .pill.main { background: #e6e0cf; color: #0b0c0b; border-color: transparent; }
+  .pill.main:hover { background: #fff; }
+  #hint { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); display: none; pointer-events: none;
+          font: 400 12px/1 "Segoe UI", system-ui, sans-serif; letter-spacing: .14em; text-transform: uppercase;
+          color: rgba(239,233,218,.75); background: rgba(10,12,10,.45); padding: 9px 14px; border-radius: 999px; transition: opacity 1.2s; }
+  body.web #hint { display: block; }
+  #drop { position: fixed; inset: 0; display: none; place-items: center; background: rgba(8,10,8,.6); pointer-events: none;
+          font: 300 28px/1.2 "Segoe UI", system-ui, sans-serif; color: #efe9da; letter-spacing: .06em; }
+  #drop.on { display: grid; }
+  @media (max-width: 700px) { #ui { inset: auto 12px 12px 12px; justify-content: center; } #hint { display: none !important; } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <a class="pill" href="https://github.com/drugenemy/deskglow/releases/latest" target="_blank" rel="noopener">Get it for Windows ↗</a>
+  <label class="pill main">＋ Use your image<input id="file" type="file" accept="image/*" multiple hidden></label>
+</div>
+<div id="hint">move the mouse · click · double-click for next scene · drop an image</div>
+<div id="drop">Drop your image — it becomes a wallpaper</div>
+<script src="scenes.js"></script>
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+//  裏 (ura) — a Deskglow wallpaper. "Everything has a hidden side."
+//
+//  Diagonal bands sweep across the screen. A full sweep covers the screen, swaps
+//  the scene underneath, and slides away. Each scene has a living layer (smoke,
+//  sparks, fireflies, petals). A slit under the mouse shows a pencil sketch that
+//  the code draws from the art itself: the hidden side.
+//
+//  Mouse      depth (parallax), pushes smoke and particles, reveals the sketch
+//  Click      裏 seal + burst
+//  Dbl-click  next scene
+//  Settings   scenes.js
+// ─────────────────────────────────────────────────────────────────────────────
+const CFG = Object.assign({ angle: 62, cutEvery: 14, sceneEvery: 120, name: 'DESKGLOW', sign: '裏側',
+  signLines: ['THE OTHER SIDE', ''], words: ['裏'], scenes: [], bandImages: [] }, window.URA || {});
+const SCENES = CFG.scenes.map(s => ({ ...s }));
+const BAND_IMAGES = [...CFG.bandImages];
+const WEB = !(window.chrome && window.chrome.webview);   // running in a normal browser, not on the desktop
+if (WEB) document.body.classList.add('web');
+
+const PAL = { ink: '#070807', inkRGB: [14, 15, 13], bone: '#e6e0cf', paper: [236, 230, 214], moss: '#2f3f2b', seal: '#a3291c' };
+const JP = '"Yu Mincho","YuMincho","Hiragino Mincho ProN","Noto Serif CJK JP","Noto Serif JP","IPAMincho",serif';
+const COND = '"Bahnschrift","Oswald","Arial Narrow",sans-serif';
+const SERIF = '"Cormorant Garamond","Garamond","Georgia",serif';
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1, K = 1;
+let U, N, TR, SR;
+const IMG = {}, SKETCH = new Map();
+let scene, sceneIdx = 0, art, layerBase, layerArt, layerPaper, grainPat, dotSprite;
+const smoke = document.createElement('canvas'), sctx = smoke.getContext('2d');
+let smokeData = null;
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+const easeIO = t => t < .5 ? 8 * t * t * t * t : 1 - Math.pow(-2 * t + 2, 4) / 2;
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+const mk = (w, h) => { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; };
+const load = src => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = src; });
+const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const fg = (a = 1) => scene.light ? rgb(PAL.inkRGB, a) : `rgba(230,224,207,${a})`;
+const hex = c => '#' + c.map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+
+// ── read colors from an image: background from its edges, accent from its most colorful pixels ──
+function analyze(img) {
+  const w = 48, h = Math.max(8, Math.round(48 * img.naturalHeight / img.naturalWidth));
+  const c = mk(w, h), g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  let er = 0, eg = 0, eb = 0, en = 0; const cols = [];
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y * w + x) * 4, r = d[i], gg = d[i + 1], b = d[i + 2];
+    if (x < 2 || y < 2 || x >= w - 2 || y >= h - 2) { er += r; eg += gg; eb += b; en++; }
+    const mx = Math.max(r, gg, b), mn = Math.min(r, gg, b), sat = mx ? (mx - mn) / mx : 0;
+    if (sat > .3 && mx > 70 && mx < 245) cols.push([sat * mx, r, gg, b]);
+  }
+  const bg = [er / en, eg / en, eb / en];
+  const light = (bg[0] * .3 + bg[1] * .59 + bg[2] * .11) > 140;
+  cols.sort((a, b) => b[0] - a[0]);
+  const top = cols.slice(0, Math.max(1, Math.round(cols.length * .08)));
+  const accent = cols.length > 6 ? hex([0, 1, 2].map(k => top.reduce((s, c) => s + c[k + 1], 0) / top.length)) : (light ? '#3f5f45' : '#8fae93');
+  return { bg, light, accent };
+}
+function completeScene(s) {
+  const a = analyze(IMG[s.img]);
+  s.bg ??= a.bg; s.light ??= a.light; s.accent ??= a.accent;
+  s.side ??= (IMG[s.img].naturalWidth > IMG[s.img].naturalHeight * 1.2 ? 'flush' : 'right');
+  s.fade ??= s.side === 'left' ? [.03, .3, .04, .06] : s.side === 'flush' ? [.32, 0, .04, 0] : [.28, .12, .04, .1];
+  s.title ??= '裏'; s.label ??= 'SCENE'; s.quote ??= ['Everything has', 'another side.'];
+  s.fx ??= 'none';
+  s.smoke ??= s.light ? [40, 40, 36] : [150, 160, 150];
+  return s;
+}
+
+// ── the hidden side: colored-pencil sketch drawn from the image ──
+function makeSketch(img) {
+  const sc = Math.min(1, 1400 / img.naturalHeight);
+  const w = Math.round(img.naturalWidth * sc), h = Math.round(img.naturalHeight * sc);
+  const c = mk(w, h), g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(img, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data, L = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) L[i] = (d[i * 4] * .3 + d[i * 4 + 1] * .59 + d[i * 4 + 2] * .11) / 255;
+  const out = g.createImageData(w, h), o = out.data, P = PAL.paper;
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - 1) * w, y1 = y * w, y2 = Math.min(h - 1, y + 1) * w;
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - 1), x2 = Math.min(w - 1, x + 1), i = y1 + x;
+      const gx = -L[y0+x0] - 2*L[y1+x0] - L[y2+x0] + L[y0+x2] + 2*L[y1+x2] + L[y2+x2];
+      const gy = -L[y0+x0] - 2*L[y0+x] - L[y0+x2] + L[y2+x0] + 2*L[y2+x] + L[y2+x2];
+      const line = Math.pow(clamp((Math.sqrt(gx * gx + gy * gy) - .08) / .34), .8);
+      const lum = L[i];
+      const tone = smooth(.03, .14, lum) * (1 - lum) * .22 * ((x + y) % 4 === 0 ? 1 : .25);
+      const a = clamp(line * .92 + tone);
+      const r = d[i*4], gg = d[i*4+1], b = d[i*4+2], m = (r + gg + b) / 3;
+      const lr = lerp(48, clamp(m + (r - m) * 2.4, 0, 255) * .8, .45);
+      const lg = lerp(50, clamp(m + (gg - m) * 2.4, 0, 255) * .8, .45);
+      const lb = lerp(56, clamp(m + (b - m) * 2.4, 0, 255) * .8, .45);
+      o[i*4] = lerp(P[0], lr, a); o[i*4+1] = lerp(P[1], lg, a); o[i*4+2] = lerp(P[2], lb, a); o[i*4+3] = 255;
+    }
+  }
+  g.putImageData(out, 0, 0);
+  return c;
+}
+const sketchOf = s => SKETCH.get(s) || (SKETCH.set(s, makeSketch(IMG[s.img])), SKETCH.get(s));
+
+function maskedArt(img, w, h, [l, r, t, b]) {
+  const c = mk(w, h), g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(img, 0, 0, c.width, c.height);
+  g.globalCompositeOperation = 'destination-in';
+  const fade = (x0, y0, x1, y1, a, z) => {
+    const gr = g.createLinearGradient(x0, y0, x1, y1);
+    gr.addColorStop(0, `rgba(0,0,0,${a ? 0 : 1})`); gr.addColorStop(a || .0001, 'rgba(0,0,0,1)');
+    gr.addColorStop(1 - (z || .0001), 'rgba(0,0,0,1)'); gr.addColorStop(1, `rgba(0,0,0,${z ? 0 : 1})`);
+    g.fillStyle = gr; g.fillRect(0, 0, c.width, c.height);
+  };
+  fade(0, 0, c.width, 0, l, r);
+  fade(0, 0, 0, c.height, t, b);
+  return c;
+}
+
+// ── layout ──
+function layout() {
+  DPR = window.devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight; K = Math.min(H / 1080, W / 1100);
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  const th = CFG.angle * Math.PI / 180;
+  U = { x: Math.cos(th), y: Math.sin(th) };
+  N = { x: -Math.sin(th), y: Math.cos(th) };
+  const corners = [[0, 0], [W, 0], [0, H], [W, H]];
+  const ts = corners.map(([x, y]) => x * U.x + y * U.y), ss = corners.map(([x, y]) => x * N.x + y * N.y);
+  TR = [Math.min(...ts) - 40, Math.max(...ts) + 40];
+  SR = [Math.min(...ss), Math.max(...ss)];
+  const sw = 176, sh = Math.max(40, Math.round(176 * H / W));
+  smoke.width = sw; smoke.height = sh; smokeData = sctx.createImageData(sw, sh);
+  buildScene();
+}
+
+function buildScene() {
+  const img = IMG[scene.img], ratio = img.naturalWidth / img.naturalHeight;
+  const narrow = W < H;                      // phones / portrait screens: art fills, text on top
+  let ah = H + 30 * K, aw = ah * ratio;
+  if (narrow && aw < W) { aw = W + 30 * K; ah = aw / ratio; }
+  let x;
+  if (narrow) x = (W - aw) / 2;
+  else if (scene.side === 'left') x = -14 * K;
+  else if (scene.side === 'flush') x = W - aw + 14 * K;
+  else x = Math.min(W * .64 - aw / 2, W - aw - 40 * K);
+  art = { x, y: H - ah + 14 * K, w: aw, h: ah };
+  art.free = narrow ? [0, W] : scene.side === 'left' ? [art.x + aw * .92, W] : [0, Math.max(W * .3, art.x + aw * .12)];
+  layerArt = maskedArt(img, aw * DPR, ah * DPR, narrow ? [0, 0, .25, 0] : scene.fade);
+  buildBase();
+  buildPaper();
+}
+
+function txt(g, s, x, y, font, color, o = {}) {
+  g.save();
+  g.font = font; g.fillStyle = color; g.textAlign = o.align || 'left'; g.textBaseline = o.base || 'alphabetic';
+  if (o.spacing) g.letterSpacing = o.spacing;
+  g.globalAlpha = o.alpha ?? 1;
+  g.fillText(s, x, y);
+  g.restore();
+}
+function vtxt(g, s, x, y, size, color, gap = 1.12) {
+  for (let i = 0; i < s.length; i++) txt(g, s[i], x, y + i * size * gap, `500 ${size}px ${JP}`, color, { align: 'center', base: 'top' });
+}
+
+function buildBase() {
+  layerBase = mk(cv.width, cv.height);
+  const g = layerBase.getContext('2d');
+  g.scale(DPR, DPR);
+  g.fillStyle = rgb(scene.bg); g.fillRect(0, 0, W, H);
+  const v = g.createRadialGradient(W * .5, H * .45, H * .1, W * .5, H * .5, Math.max(W, H) * .75);
+  v.addColorStop(0, scene.light ? 'rgba(255,250,240,.35)' : 'rgba(40,52,38,.22)'); v.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = v; g.fillRect(0, 0, W, H);
+
+  const [f0, f1] = art.free, fw = f1 - f0;
+  const x0 = scene.side === 'left' && W >= H ? f0 + 40 * K : 64 * K;
+
+  txt(g, scene.title, f0 + fw * .5, H * .52, `600 ${Math.min(620 * K, fw * .9)}px ${JP}`, scene.accent,
+      { align: 'center', base: 'middle', alpha: scene.light ? .07 : .06 });
+
+  g.save();
+  g.font = `200 ${330 * K}px ${COND}`; g.fontStretch = 'condensed'; g.letterSpacing = `${6 * K}px`;
+  const fit = (fw - 80 * K) / g.measureText(CFG.name).width;
+  g.font = `200 ${330 * K * Math.min(1, fit)}px ${COND}`;
+  g.strokeStyle = fg(.13); g.lineWidth = 1.2 * K;
+  g.strokeText(CFG.name, x0 - 10 * K, H - 46 * K);
+  g.restore();
+
+  const by = 64 * K, sh = (CFG.sign.length * 1.4 + .5) * 30 * K;
+  g.strokeStyle = fg(.55); g.lineWidth = 1;
+  g.strokeRect(x0, by, 46 * K, sh);
+  vtxt(g, CFG.sign, x0 + 23 * K, by + 16 * K, 30 * K, fg(), 1.4);
+  txt(g, CFG.signLines[0] || '', x0 + 70 * K, by + 18 * K, `500 ${13 * K}px ${COND}`, fg(), { spacing: `${4 * K}px`, base: 'top' });
+  txt(g, CFG.signLines[1] || '', x0 + 70 * K, by + 40 * K, `400 ${11 * K}px ${COND}`, fg(.5), { spacing: `${3 * K}px`, base: 'top' });
+  g.fillStyle = scene.accent; g.fillRect(x0 + 70 * K, by + 66 * K, 28 * K, 2 * K);
+
+  const idx = String(sceneIdx + 1).padStart(2, '0');
+  txt(g, `${idx} / ${String(SCENES.length).padStart(2, '0')}  —  ${scene.label}`, x0 + 70 * K, by + 96 * K,
+      `400 ${11 * K}px ${COND}`, fg(.6), { spacing: `${3 * K}px`, base: 'top' });
+  const qy = H * .5 + 120 * K;
+  g.fillStyle = scene.accent; g.fillRect(x0 + 4 * K, qy, 2 * K, 52 * K);
+  scene.quote.forEach((q, i) => txt(g, i ? `${q}”` : `“${q}`, x0 + 20 * K, qy + 18 * K + i * 26 * K, `italic 400 ${20 * K}px ${SERIF}`, fg(.85)));
+}
+
+function buildPaper() {
+  layerPaper = mk(cv.width, cv.height);
+  const g = layerPaper.getContext('2d');
+  g.scale(DPR, DPR);
+  g.fillStyle = rgb(PAL.paper); g.fillRect(0, 0, W, H);
+  g.strokeStyle = 'rgba(70,110,170,.17)'; g.lineWidth = 1;
+  for (let x = 0; x < W; x += 48 * K) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); }
+  for (let y = 0; y < H; y += 48 * K) { g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); }
+  const ax = clamp(art.x, 0, Math.max(0, W - 200 * K));
+  g.strokeStyle = 'rgba(200,60,50,.35)'; g.strokeRect(ax + 30 * K, 40 * K, Math.min(art.w, W - ax) - 60 * K, H - 80 * K);
+  txt(g, `C-${120 + sceneIdx * 7}`, ax + 44 * K, 78 * K, `600 ${26 * K}px ${COND}`, 'rgba(190,50,40,.75)');
+  txt(g, `裏 ${'ABCDEFGHIJ'[sceneIdx % 10]}`, ax + 44 * K, 112 * K, `500 ${20 * K}px ${JP}`, 'rgba(50,90,170,.7)');
+  txt(g, 'TIMING 6 / 8', ax + 44 * K, 140 * K, `600 ${16 * K}px ${COND}`, 'rgba(190,50,40,.55)');
+}
+
+function buildSprites() {
+  const c = mk(220, 220), g = c.getContext('2d'), id = g.createImageData(220, 220);
+  for (let i = 0; i < id.data.length; i += 4) { const v = Math.random() * 255; id.data[i] = id.data[i+1] = id.data[i+2] = v; id.data[i+3] = 255; }
+  g.putImageData(id, 0, 0);
+  grainPat = ctx.createPattern(c, 'repeat');
+  dotSprite = mk(64, 64);
+  const d = dotSprite.getContext('2d'), gr = d.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(.4, 'rgba(255,255,255,.45)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  d.fillStyle = gr; d.fillRect(0, 0, 64, 64);
+}
+const tinted = {};
+function sprite(color) {
+  const k = color.join(',');
+  if (tinted[k]) return tinted[k];
+  const c = mk(64, 64), g = c.getContext('2d');
+  g.drawImage(dotSprite, 0, 0);
+  g.globalCompositeOperation = 'source-in'; g.fillStyle = rgb(color); g.fillRect(0, 0, 64, 64);
+  return tinted[k] = c;
+}
+
+// ── mouse ──
+const mouse = { x: innerWidth / 2, y: innerHeight / 2, vx: 0, vy: 0, last: -1e9 };
+const par = { x: 0, y: 0 };
+let trail = [];
+function onMove(cx, cy) {
+  const now = performance.now();
+  const dx = cx - mouse.x, dy = cy - mouse.y;
+  mouse.vx = lerp(mouse.vx, dx, .5); mouse.vy = lerp(mouse.vy, dy, .5);
+  mouse.x = cx; mouse.y = cy; mouse.last = now;
+  if (Math.hypot(dx, dy) > 2) {
+    trail.push({ x: cx / W, y: cy / H, vx: dx / W, vy: dy / H, t: now });
+    if (trail.length > 20) trail.shift();
+  }
+  if (lens.x < -1e3) { lens.x = cx; lens.y = cy; }
+}
+addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
+addEventListener('touchmove', e => { const t = e.touches[0]; onMove(t.clientX, t.clientY); }, { passive: true });
+let seals = [], lastClick = { t: -1e9, x: 0, y: 0 };
+addEventListener('click', e => {
+  if (e.target.closest && e.target.closest('#ui')) return;
+  const now = performance.now();
+  if (now - lastClick.t < 380 && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 40) {
+    lastClick.t = -1e9;
+    nextScene(now);
+    return;
+  }
+  lastClick = { t: now, x: e.clientX, y: e.clientY };
+  seals.push({ x: e.clientX, y: e.clientY, start: now, rot: rand(-.14, .06) });
+  burst(e.clientX, e.clientY);
+  for (let i = 0; i < 6; i++) trail.push({ x: e.clientX / W, y: e.clientY / H, vx: rand(-.02, .02), vy: rand(-.02, .02), t: now, big: 1 });
+});
+
+// ── smoke: domain-warped value noise; the mouse trail pushes and clears it ──
+function hash(i, j) {
+  let h = Math.imul(i, 374761393) + Math.imul(j, 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) & 0xffff) / 65535;
+}
+function noise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash(xi, yi), b = hash(xi + 1, yi), c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y) { let s = 0, a = .5; for (let o = 0; o < 3; o++) { s += a * noise(x, y); x *= 2.03; y *= 2.03; a *= .5; } return s / .875; }
+function updateSmoke(t) {
+  const sw = smoke.width, sh = smoke.height, d = smokeData.data, [r, g, b] = scene.smoke;
+  const tt = t * .00004, asp = H / W;
+  trail = trail.filter(p => t - p.t < 2600);
+  const live = trail.map(p => ({ ...p, life: 1 - (t - p.t) / 2600, r2: (p.big ? .012 : .004) }));
+  const light = scene.light;
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+    const u = x / sw, v = y / sh;
+    let ox = 0, oy = 0, clear = 0;
+    for (const p of live) {
+      const dx = u - p.x, dy = (v - p.y) * asp, d2 = dx * dx + dy * dy;
+      if (d2 > p.r2 * 9) continue;
+      const f = Math.exp(-d2 / p.r2) * p.life;
+      ox -= p.vx * f * 30 + dy * f * 2.2; oy -= p.vy * f * 30 - dx * f * 2.2;
+      clear = Math.max(clear, f);
+    }
+    const px = (u + ox) * 4.2, py = (v + oy) * 4.2 * asp * 1.6;
+    const qx = fbm(px + tt * 1.3, py - tt), qy = fbm(px + 5.2 - tt, py + 1.3 + tt * .7);
+    const n = fbm(px + 2.2 * qx + tt * 2, py + 2.2 * qy - tt * 3);
+    const edge = light ? .35 + .65 * (1 - v) : .45 + .55 * Math.max(1 - u * 1.4, v < .45 ? 1 - v * 1.6 : 0, u > .82 ? 1 : 0);
+    const a = Math.pow(smooth(.56, .78, n), 1.6) * edge * (1 - clear * .75);
+    const i = (y * sw + x) * 4;
+    d[i] = r; d[i + 1] = g; d[i + 2] = b; d[i + 3] = a * 255;
+  }
+  sctx.putImageData(smokeData, 0, 0);
+}
+
+// ── particles ──
+let parts = [];
+const artPt = ([ix, iy]) => {
+  const img = IMG[scene.img];
+  return { x: art.x + par.x + ix / img.naturalWidth * art.w, y: art.y + par.y + iy / img.naturalHeight * art.h };
+};
+function spawn(kind, x, y, extra = {}) {
+  const p = { kind, x, y, vx: 0, vy: 0, age: 0, life: 1, size: 1, rot: 0, vr: 0, phase: Math.random() * 6.28, ...extra };
+  parts.push(p);
+  return p;
+}
+const petal = (x, y, extra = {}) => spawn('petal', x, y, { vx: rand(-.5, -.15) * K, vy: rand(.35, .8) * K, life: 20000, size: rand(5, 9) * K, rot: rand(0, 6.28), vr: rand(-.02, .02), ...extra });
+const ash = (x, y, extra = {}) => spawn('ash', x, y, { vx: rand(.05, .2), vy: rand(.05, .18), life: rand(6000, 11000), size: rand(1, 2.4) * K, ...extra });
+const fly = (x, y, extra = {}) => spawn('fly', x, y, { vx: rand(-.2, .2), vy: rand(-.2, .2), life: rand(5000, 9000), size: rand(1.4, 2.6) * K, ...extra });
+function flyPos() {
+  const [x1, y1, x2, y2] = scene.area || [0, IMG[scene.img].naturalHeight * .45, IMG[scene.img].naturalWidth, IMG[scene.img].naturalHeight];
+  return artPt([rand(x1, x2), rand(y1, y2)]);
+}
+function emit(dt) {
+  if (parts.length > 260) return;
+  const fx = scene.fx;
+  if (fx === 'pipe' && scene.pipe && Math.random() < dt * .012) {
+    const p = artPt(scene.pipe);
+    spawn('puff', p.x + rand(-3, 3) * K, p.y, { vx: rand(-.1, .1), vy: rand(-.55, -.35) * K, life: rand(4200, 6500), size: rand(5, 9) * K });
+  }
+  if (fx === 'embers' && scene.line && Math.random() < dt * .02) {
+    const [a, b] = scene.line.map(artPt), t = Math.random();
+    spawn('ember', lerp(a.x, b.x, t), lerp(a.y, b.y, t), { vx: rand(-.2, .2), vy: rand(-.9, -.3) * K, life: rand(1600, 3600), size: rand(1, 2.6) * K });
+  }
+  if (fx === 'fireflies' && Math.random() < dt * .004) { const p = flyPos(); fly(p.x, p.y); }
+  if (fx === 'petals' && Math.random() < dt * .01) petal(rand(-W * .1, W * 1.05), -20);
+  if (scene.ash && Math.random() < dt * .006) ash(rand(0, W), rand(-20, H * .6));
+}
+function prewarm() {
+  if (scene.fx === 'petals') for (let i = 0; i < 45; i++) petal(rand(0, W), rand(0, H), { age: rand(300, 4000) });
+  if (scene.fx === 'fireflies') for (let i = 0; i < 30; i++) { const p = flyPos(); fly(p.x, p.y, { age: rand(300, 3000) }); }
+  if (scene.ash) for (let i = 0; i < 25; i++) ash(rand(0, W), rand(0, H * .8), { age: rand(300, 3000) });
+}
+function burst(x, y) {
+  const n = 22;
+  const kind = { embers: 'ember', petals: 'petal', fireflies: 'fly' }[scene.fx] || 'puff';
+  for (let i = 0; i < n; i++) {
+    const a = i / n * 6.28 + rand(-.2, .2), s = rand(1.5, 4.5) * K;
+    spawn(kind, x, y, { vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: kind === 'petal' ? 9000 : kind === 'fly' ? 5000 : rand(900, 2200),
+      size: (kind === 'puff' ? rand(6, 12) : kind === 'petal' ? rand(5, 9) : rand(1.5, 3)) * K, rot: rand(0, 6.28), vr: rand(-.05, .05), drag: .94 });
+  }
+}
+function stepParticles(dt, t) {
+  const mr = 170 * K, active = t - mouse.last < 500;
+  for (const p of parts) {
+    p.age += dt;
+    const dx = p.x - mouse.x, dy = p.y - mouse.y, d = Math.hypot(dx, dy);
+    if (d < mr && active) {
+      const f = (1 - d / mr);
+      p.vx += (dx / (d + 1)) * f * .35 * K + mouse.vx * f * .05;
+      p.vy += (dy / (d + 1)) * f * .35 * K + mouse.vy * f * .05;
+    }
+    const k = p.kind;
+    if (k === 'puff') { p.vx += Math.sin(p.age * .002 + p.phase) * .006; p.vy -= .0008; p.size += .012 * K * dt / 16; }
+    if (k === 'ember') { p.vx += Math.sin(p.age * .01 + p.phase) * .02; p.vy -= .004;
+      if (active && d < 420 * K) { p.vx -= dx / (d + 1) * .02; p.vy -= dy / (d + 1) * .02; } }
+    if (k === 'fly') { p.vx += Math.sin(p.age * .0013 + p.phase) * .01; p.vy += Math.cos(p.age * .0011 + p.phase * 2) * .01;
+      if (active && d < 300 * K && d > 30 * K) { p.vx -= dx / d * .012; p.vy -= dy / d * .012; } }        // drawn to the cursor
+    if (k === 'petal') { p.vx += Math.sin(p.age * .0015 + p.phase) * .012; p.rot += p.vr * dt / 16; }
+    if (k === 'ash') { p.vx += Math.sin(p.age * .001 + p.phase) * .003; }
+    const drag = p.drag ?? (k === 'petal' ? .985 : k === 'fly' ? .97 : .99);
+    if (p.drag && Math.hypot(p.vx, p.vy) < .6 * K) p.drag = undefined;
+    p.vx *= drag; p.vy *= drag;
+    if (k === 'petal') p.vy = lerp(p.vy, .55 * K, .01);
+    p.x += p.vx * dt / 16; p.y += p.vy * dt / 16;
+  }
+  parts = parts.filter(p => p.age < p.life && p.y < H + 60 && p.y > -120 && p.x > -120 && p.x < W + 120);
+}
+function drawParticles() {
+  screen();
+  for (const p of parts) {
+    const life = p.age / p.life, fade = Math.min(1, p.age / 300) * (1 - smooth(.6, 1, life));
+    if (p.kind === 'puff') {
+      ctx.globalCompositeOperation = scene.light ? 'multiply' : 'screen';
+      ctx.globalAlpha = fade * (scene.light ? .22 : .2);
+      const s = p.size * 2;
+      ctx.drawImage(sprite(scene.smoke), p.x - s, p.y - s, s * 2, s * 2);
+    } else if (p.kind === 'ember' || p.kind === 'fly') {
+      ctx.globalCompositeOperation = 'lighter';
+      const isFly = p.kind === 'fly', fl = isFly ? .5 + .5 * Math.sin(p.age * .004 + p.phase) : .6 + .4 * Math.sin(p.age * .03 + p.phase);
+      ctx.globalAlpha = fade * fl * (isFly ? .7 : .9);
+      const s = p.size * (isFly ? 6 : 4);
+      ctx.drawImage(sprite(isFly ? [210, 230, 140] : [255, 90, 50]), p.x - s, p.y - s, s * 2, s * 2);
+      ctx.globalAlpha = fade * fl;
+      ctx.fillStyle = isFly ? 'rgb(240,255,200)' : 'rgb(255,214,170)'; ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    } else if (p.kind === 'petal') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = fade * .85;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.scale(Math.cos(p.age * .004 + p.phase), 1);
+      ctx.fillStyle = '#e6b3c3';
+      ctx.beginPath(); ctx.ellipse(0, 0, p.size, p.size * .6, 0, 0, 6.28); ctx.fill();
+      ctx.fillStyle = 'rgba(160,70,100,.35)'; ctx.beginPath(); ctx.ellipse(p.size * .3, 0, p.size * .4, p.size * .25, 0, 0, 6.28); ctx.fill();
+      ctx.restore();
+    } else if (p.kind === 'ash') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = fade * .5; ctx.fillStyle = scene.light ? rgb(PAL.inkRGB) : PAL.bone;
+      ctx.fillRect(p.x, p.y, p.size, p.size);
+    }
+  }
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+}
+function drawLineGlow(t) {
+  if (scene.fx !== 'embers' || !scene.line) return;
+  const [a, b] = scene.line.map(artPt), pulse = .55 + .45 * Math.sin(t * .0025) * Math.sin(t * .0071 + 1);
+  screen();
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = `rgba(255,60,40,${.25 + pulse * .35})`; ctx.lineCap = 'round';
+  ctx.shadowColor = 'rgba(255,40,30,.9)'; ctx.shadowBlur = (18 + pulse * 22) * K;
+  ctx.lineWidth = 3 * K;
+  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  ctx.restore();
+}
+
+// ── bands ──
+let bands = [], nextCut = 0, nextSceneAt = 0, pendingSwap = null;
+const TYPES = [['sketch', 30], ['img', 22], ['stripes', 16], ['accent', 8], ['moss', 12], ['bone', 12]];
+function pickType(noSketch) {
+  for (;;) { let r = Math.random() * 100; for (const [t, w] of TYPES) if ((r -= w) < 0) { if (!(noSketch && t === 'sketch') && !(t === 'img' && !BAND_IMAGES.length)) return t; break; } }
+}
+function cut(now, full = false) {
+  const items = [];
+  let total = 0;
+  const span = full ? (SR[1] - SR[0]) + 40 : (SR[1] - SR[0]) * rand(.5, .8);
+  while (total < span) {
+    const w = (Math.random() < .2 ? rand(40, 90) : rand(150, 400)) * K;
+    const gap = full || Math.random() < .55 ? 0 : rand(8, 60) * K;
+    items.push([w, gap]); total += w + gap;
+  }
+  let s = full ? SR[0] - 20 : lerp(SR[0], SR[1], rand(.4, .6)) - total / 2;
+  const hold = full ? 650 : rand(2400, 3400), dirBase = Math.random() < .5 ? 1 : -1;
+  let coveredAt = 0;
+  items.forEach(([w, gap], i) => {
+    const b = {
+      s0: s, s1: s + w, dir: (i % 2 ? -dirBase : dirBase) * (!full && Math.random() < .2 ? -1 : 1),
+      start: now + i * (full ? 40 : 55) + rand(0, full ? 40 : 80), enter: rand(520, 720),
+      hold: full ? 650 + (items.length - i) * 40 : hold + rand(-150, 150), exit: rand(560, 760),
+      type: pickType(full), word: CFG.words[Math.floor(Math.random() * CFG.words.length)],
+      img: BAND_IMAGES[Math.floor(Math.random() * BAND_IMAGES.length)], accent: scene.accent,
+    };
+    coveredAt = Math.max(coveredAt, b.start + b.enter);
+    bands.push(b);
+    s += w + gap;
+  });
+  return coveredAt;
+}
+function nextScene(now, idx) {
+  if (pendingSwap || SCENES.length < 2 && idx == null) return;
+  const covered = cut(now, true);
+  pendingSwap = { at: covered + 60, idx: idx ?? (sceneIdx + 1) % SCENES.length };
+  nextSceneAt = now + CFG.sceneEvery * 1000;
+}
+function setScene(i) {
+  sceneIdx = i; scene = SCENES[i];
+  parts = [];
+  buildScene();
+  prewarm();
+}
+
+function bandRange(b, now) {
+  const l = now - b.start;
+  if (l < 0) return null;
+  const e = clamp(l / b.enter), x = clamp((l - b.enter - b.hold) / b.exit);
+  if (x >= 1) return 'done';
+  let ta, tb;
+  if (b.dir > 0) { ta = lerp(TR[0], TR[1], easeIO(x)); tb = lerp(TR[0], TR[1], easeIO(e)); }
+  else { ta = lerp(TR[1], TR[0], easeIO(e)); tb = lerp(TR[1], TR[0], easeIO(x)); }
+  return [ta, tb, l];
+}
+const basis = () => ctx.setTransform(DPR * U.x, DPR * U.y, DPR * N.x, DPR * N.y, 0, 0);
+const screen = () => ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+function drawSketchWindow() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(layerPaper, 0, 0);
+  screen();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.drawImage(sketchOf(scene), art.x + par.x, art.y + par.y, art.w, art.h);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function drawBand(b, now) {
+  const r = bandRange(b, now);
+  if (!r) return true;
+  if (r === 'done') return false;
+  const [ta, tb, l] = r, w = b.s1 - b.s0;
+  ctx.save();
+  basis();
+  ctx.beginPath(); ctx.rect(Math.min(ta, tb), b.s0, Math.abs(tb - ta), w); ctx.clip();
+  const tm = (TR[0] + TR[1]) / 2, sm = (b.s0 + b.s1) / 2, slide = l * .02 * b.dir;
+  switch (b.type) {
+    case 'sketch': drawSketchWindow(); break;
+    case 'img': {
+      const im = IMG[b.img];
+      screen();
+      ctx.fillStyle = rgb(PAL.paper); ctx.fillRect(0, 0, W, H);
+      if (im) {
+        const h = H * 1.15, iw = h * im.naturalWidth / im.naturalHeight;
+        const cx = U.x * (tm + slide * 3) + N.x * sm, cy = U.y * (tm + slide * 3) + N.y * sm;
+        ctx.drawImage(im, cx - iw / 2, cy - h / 2, iw, h);
+      }
+      break;
+    }
+    case 'stripes': {
+      ctx.fillStyle = PAL.bone; ctx.fillRect(TR[0], b.s0, TR[1] - TR[0], w);
+      ctx.fillStyle = PAL.ink;
+      const st = Math.max(8, 13 * K);
+      for (let s = b.s0 + st / 2; s < b.s1; s += st * 2) ctx.fillRect(TR[0], s, TR[1] - TR[0], st);
+      ctx.fillStyle = PAL.moss; ctx.fillRect(TR[0], b.s0, TR[1] - TR[0], Math.min(6 * K, w * .08));
+      break;
+    }
+    default: {
+      const bg = { accent: b.accent, moss: PAL.moss, bone: PAL.bone }[b.type];
+      const col = b.type === 'bone' ? PAL.ink : PAL.bone;
+      ctx.fillStyle = bg; ctx.fillRect(TR[0], b.s0, TR[1] - TR[0], w);
+      ctx.fillStyle = b.type === 'bone' ? b.accent : 'rgba(0,0,0,.28)';
+      const bl = (TR[1] - TR[0]) * .22, bp = lerp(TR[0] - bl, TR[1], (l * .00018 * (b.dir > 0 ? 1 : -1) % 1 + 1) % 1);
+      ctx.fillRect(bp, b.s0, bl, w);
+      const size = clamp(w * .34, 12 * K, 64 * K);
+      ctx.font = /[぀-ヿ一-鿿]/.test(b.word) ? `600 ${size}px ${JP}` : `500 ${size}px ${COND}`;
+      ctx.letterSpacing = `${size * .12}px`;
+      ctx.fillStyle = col; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+      const step = ctx.measureText(b.word).width + size * 3;
+      const off = ((slide * 2) % step + step) % step;
+      for (let t = TR[0] - step + off; t < TR[1] + step; t += step) ctx.fillText(b.word, t, sm);
+    }
+  }
+  ctx.restore();
+  return true;
+}
+
+// ── mouse slit onto the hidden side ──
+const lens = { x: -1e4, y: -1e4, a: 0 };
+function drawLens(now) {
+  lens.x += (mouse.x - lens.x) * .16; lens.y += (mouse.y - lens.y) * .16;
+  lens.a += ((now - mouse.last < 2200 ? 1 : 0) - lens.a) * .08;
+  if (lens.a < .01) return;
+  const t = lens.x * U.x + lens.y * U.y, s = lens.x * N.x + lens.y * N.y;
+  const len = 300 * K * lens.a, half = 46 * K;
+  ctx.save();
+  basis();
+  ctx.beginPath(); ctx.rect(t - len, s - half, len * 2, half * 2); ctx.clip();
+  ctx.globalAlpha = lens.a;
+  drawSketchWindow();
+  ctx.restore();
+  ctx.save();
+  basis();
+  ctx.globalAlpha = lens.a; ctx.fillStyle = scene.accent;
+  ctx.fillRect(t - len, s - half - 2 * K, len * 2, 2 * K);
+  ctx.fillRect(t - len, s + half, len * 2, 2 * K);
+  ctx.restore();
+}
+
+function drawSeals(now) {
+  seals = seals.filter(sl => now - sl.start < 1800);
+  for (const sl of seals) {
+    const p = (now - sl.start) / 1800, size = 74 * K;
+    const sc = 1 + .6 * (1 - easeOut(clamp(p * 5)));
+    const a = p < .65 ? clamp(p * 6) : 1 - (p - .65) / .35;
+    ctx.save();
+    screen();
+    ctx.translate(sl.x, sl.y); ctx.rotate(sl.rot); ctx.scale(sc, sc);
+    ctx.globalAlpha = a * .92;
+    ctx.fillStyle = PAL.seal; ctx.fillRect(-size / 2, -size / 2, size, size);
+    ctx.strokeStyle = PAL.bone; ctx.lineWidth = 2 * K; ctx.strokeRect(-size / 2 + 6 * K, -size / 2 + 6 * K, size - 12 * K, size - 12 * K);
+    ctx.font = `700 ${size * .62}px ${JP}`; ctx.fillStyle = PAL.bone; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('裏', 0, size * .03);
+    ctx.restore();
+  }
+}
+
+// ── clock ──
+const DAYS = ['日', '月', '火', '水', '木', '金', '土'];
+function drawClock() {
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, '0'), mm = String(d.getMinutes()).padStart(2, '0');
+  const x = scene.side === 'left' && W >= H ? art.free[0] + 40 * K : 64 * K, y = H * .5;
+  screen();
+  ctx.save();
+  ctx.font = `200 ${132 * K}px ${COND}`; ctx.fontStretch = 'condensed';
+  ctx.fillStyle = fg(.92); ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`${hh}:${mm}`, x, y);
+  ctx.restore();
+  const en = d.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' }).toUpperCase();
+  txt(ctx, en, x + 4 * K, y + 34 * K, `400 ${14 * K}px ${COND}`, fg(.6), { spacing: `${5 * K}px` });
+  txt(ctx, `${d.getMonth() + 1}月${d.getDate()}日 ${DAYS[d.getDay()]}曜日`, x + 4 * K, y + 62 * K, `500 ${15 * K}px ${JP}`, scene.accent, { alpha: .95 });
+}
+
+// ── main loop ──
+let frameNo = 0, lastT = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (window.deskglow?.paused || !layerBase) { lastT = now; return; }
+  const dt = Math.min(50, now - (lastT || now)); lastT = now;
+  frameNo++;
+
+  if (pendingSwap && now >= pendingSwap.at) { setScene(pendingSwap.idx); pendingSwap = null; }
+  if (now > nextSceneAt) nextScene(now);
+  if (now > nextCut && bands.length === 0) { cut(now); nextCut = now + CFG.cutEvery * 1000; }
+  if (frameNo % 3 === 0) updateSmoke(now);
+
+  const tx = (.5 - mouse.x / W) * 18 * K, ty = (.5 - mouse.y / H) * 10 * K;
+  par.x += (tx - par.x) * .05; par.y += (ty - par.y) * .05;
+  mouse.vx *= .9; mouse.vy *= .9;
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(layerBase, 0, 0);
+
+  screen();
+  ctx.drawImage(layerArt, art.x + par.x, art.y + par.y, art.w, art.h);
+  drawLineGlow(now);
+
+  ctx.save();
+  ctx.globalCompositeOperation = scene.light ? 'multiply' : 'screen';
+  ctx.globalAlpha = scene.light ? .14 : .42; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(smoke, -par.x * .5, -par.y * .5, W, H);
+  ctx.restore();
+
+  emit(dt); stepParticles(dt, now); drawParticles();
+  drawClock();
+  bands = bands.filter(b => drawBand(b, now));
+  drawLens(now);
+  drawSeals(now);
+
+  screen();
+  ctx.save();
+  ctx.globalAlpha = scene.light ? .06 : .045; ctx.fillStyle = grainPat;
+  ctx.translate(-Math.random() * 200, -Math.random() * 200);
+  ctx.fillRect(0, 0, W + 220, H + 220);
+  ctx.restore();
+}
+
+// ── your own images (browser demo): file picker + drag & drop ──
+async function addImages(files) {
+  let first = null;
+  for (const f of files) {
+    if (!f.type.startsWith('image/')) continue;
+    const url = URL.createObjectURL(f);
+    try { IMG[url] = await load(url); } catch { continue; }
+    const s = completeScene({ img: url, title: '裏', label: f.name.replace(/\.[^.]+$/, '').slice(0, 18).toUpperCase(),
+                              quote: ['Everything has', 'another side.'] });
+    s.fx = s.light ? 'petals' : 'fireflies';
+    SCENES.push(s); BAND_IMAGES.push(url);
+    if (first == null) first = SCENES.length - 1;
+  }
+  if (first != null) { pendingSwap = null; nextScene(performance.now(), first); }
+}
+document.getElementById('file').addEventListener('change', e => addImages([...e.target.files]));
+const drop = document.getElementById('drop');
+addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('on'); });
+addEventListener('dragleave', e => { if (!e.relatedTarget) drop.classList.remove('on'); });
+addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('on'); addImages([...e.dataTransfer.files]); });
+setTimeout(() => { document.getElementById('hint').style.opacity = 0; }, 9000);
+
+(async () => {
+  const paths = [...new Set([...SCENES.map(s => s.img), ...BAND_IMAGES])];
+  await Promise.all(paths.map(async p => { try { IMG[p] = await load(p); } catch { } }));
+  for (let i = SCENES.length - 1; i >= 0; i--) if (!IMG[SCENES[i].img]) SCENES.splice(i, 1);
+  for (let i = BAND_IMAGES.length - 1; i >= 0; i--) if (!IMG[BAND_IMAGES[i]]) BAND_IMAGES.splice(i, 1);
+  SCENES.forEach(completeScene);
+  buildSprites();
+  if (!SCENES.length) { document.body.innerHTML = '<p style="color:#ccc;font:16px system-ui;padding:40px">No images found. Add some to img/ and list them in scenes.js.</p>'; return; }
+  const hour = new Date().getHours(), q = new URLSearchParams(location.search).get('scene');
+  const nightIdx = SCENES.findIndex(s => !s.light), dayIdx = SCENES.findIndex(s => s.light);
+  let start = q != null ? +q : (hour >= 19 || hour < 6 ? nightIdx : dayIdx);
+  if (!(start >= 0 && start < SCENES.length)) start = 0;
+  sceneIdx = start; scene = SCENES[start];
+  layout();
+  prewarm();
+  const now = performance.now();
+  nextCut = now + 2500; nextSceneAt = now + CFG.sceneEvery * 1000;
+  addEventListener('resize', () => layout());
+  requestAnimationFrame(frame);
+  SCENES.forEach((s, i) => setTimeout(() => sketchOf(s), 1200 + i * 700));
+})();
+</script>
+</body>
+</html>

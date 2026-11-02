@@ -1,0 +1,43 @@
+# Builds Deskglow.exe and attaches a zip to a GitHub Release.
+# Runs when a version tag is pushed (for example: git tag v0.4.0 && git push origin v0.4.0).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish
+        run: dotnet publish src/Deskglow.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o out
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item README.md out/README.md
+          Copy-Item LICENSE out/LICENSE.txt
+          Compress-Archive -Path out/* -DestinationPath Deskglow-win-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Deskglow-win-x64
+          path: Deskglow-win-x64.zip
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Deskglow-win-x64.zip
+          generate_release_notes: true
